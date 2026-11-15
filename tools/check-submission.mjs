@@ -11,8 +11,10 @@
  *
  * What the server's own check found (a manifest that is not valid, code that does not compile, a broken signature) is
  * reported first, as the server said it. Then, per plugin:
- *   - the folder is `plugins/<id>/` and holds the plugin file `<id>.ts` or `<id>.js`, a README.md and nothing else
- *     (a LICENSE file is allowed);
+ *   - the folder is `plugins/<id>/` and holds the plugin file `<id>.ts` or `<id>.js`, its test `<id>.test.ts` or
+ *     `<id>.test.js`, a README.md and nothing else (a LICENSE file is allowed);
+ *   - the test uses tools/testing/server, that is: it runs the plugin in the server's sandbox (this tool only reads the
+ *     test; the workflow's job `test` runs it);
  *   - the file carries no signature: the signing workflow of this repository puts it there, nobody else;
  *   - a licence is named in the first 200 lines as `SPDX-License-Identifier: <id>`, one of LICENCES below;
  *   - the source is readable: no line over 2000 characters, on average at most 300 (bundled or minified code is refused);
@@ -47,8 +49,12 @@ export function problemsOf(entry, base, catalog) {
   const dir = dirname(file);
   const others = readdirSync(dir).filter((n) => n !== name);
   if (!others.includes("README.md")) problems.push(`plugins/${folder}/README.md is missing: it says what the plugin does and what it needs each host for`);
-  const extra = others.filter((n) => !["README.md", "LICENSE", "LICENSE.md", "LICENSE.txt"].includes(n));
-  if (extra.length) problems.push(`plugins/${folder}/ holds the plugin file and a README.md, nothing else; found ${extra.map((n) => JSON.stringify(n)).join(", ")}`);
+  const tests = others.filter((n) => n === `${folder}.test.ts` || n === `${folder}.test.js`);
+  if (tests.length === 0) problems.push(`plugins/${folder}/${folder}.test.ts is missing: a plugin comes with a test that runs it in the server's sandbox against sources the test plays (README.md, "How to submit a plugin"; plugins/game-news/game-news.test.ts is an example)`);
+  else if (tests.length > 1) problems.push(`plugins/${folder}/ holds two tests: keep one of ${folder}.test.ts and ${folder}.test.js`);
+  else if (!readFileSync(join(dir, tests[0]), "utf8").includes("tools/testing/server")) problems.push(`${tests[0]} does not import tools/testing/server: a plugin's test runs the plugin in the server's sandbox, which that file hands out`);
+  const extra = others.filter((n) => !["README.md", "LICENSE", "LICENSE.md", "LICENSE.txt", ...tests].includes(n));
+  if (extra.length) problems.push(`plugins/${folder}/ holds the plugin file, its test and a README.md, nothing else; found ${extra.map((n) => JSON.stringify(n)).join(", ")}`);
 
   const status = entry.signature?.status;
   if (status !== "none") problems.push(status === "valid" || status === "revoked"

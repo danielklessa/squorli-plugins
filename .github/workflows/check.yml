@@ -2,7 +2,8 @@
 #
 # What it does: reads each plugin file with the server's own code (danielklessa/squorli at the commit SERVER_REF names:
 # the manifest, the TypeScript's types taken off, a compile in the sandbox, the signature) and then holds it against the
-# rules of this repository (tools/check-submission.mjs). It NEVER runs a plugin, and it has no secret and no write access.
+# rules of this repository (tools/check-submission.mjs). The job `check` NEVER runs a plugin or anything else of a
+# submission; the job `test` at the end runs the tests the plugins bring, apart from it. Neither has a secret or write access.
 #
 # A pull request is somebody else's content, so the job keeps two checkouts apart:
 #   trusted/     the base branch: the tools, SERVER_REF and the catalogue come from here, never from the pull request
@@ -95,3 +96,49 @@ jobs:
       - name: The rules of this repository
         if: steps.files.outputs.count != '0'
         run: node trusted/tools/check-submission.mjs "$RUNNER_TEMP/check.json" --base "$GITHUB_WORKSPACE/submission" --catalog "$GITHUB_WORKSPACE/trusted/catalog.json"
+
+  # Every plugin brings a test (plugins/<id>/<id>.test.ts). This job typechecks the plugins against the interface a plugin
+  # sees and runs those tests, with the server's compiler, test runner and sandbox (trusted/tools/test.mjs).
+  #
+  # A test is a program, and in a pull request it is somebody else's program. That is why it runs here and nowhere else:
+  # this job has no secret, a token that can only read, and no cache; the server's dependencies are installed before
+  # anything of the pull request runs; and nothing this job leaves behind is read by another job or workflow. The job
+  # `check` above stays what it was: it reads a submission as text and runs nothing of it.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: submission
+          persist-credentials: false
+      - name: The server commit whose sandbox is used
+        id: ref
+        run: |
+          ref="$(tr -d ' \r\n' < trusted/SERVER_REF)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::SERVER_REF must hold one full commit SHA of danielklessa/squorli"; exit 1; fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ steps.ref.outputs.sha }}
+          path: server
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: server/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Install the server's dependencies
+        working-directory: server
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and tests of the plugins
+        run: node trusted/tools/test.mjs --server "$GITHUB_WORKSPACE/server" --repo "$GITHUB_WORKSPACE/submission"

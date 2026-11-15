@@ -11,7 +11,8 @@ REVIEW.md first. One plugin per pull request. For anything else (tools, document
 
 ## Before you open the pull request
 
-- [ ] The folder holds the plugin file `<id>.ts` or `<id>.js` and a `README.md`, nothing else, and the folder's name is the manifest's `id`.
+- [ ] The folder holds the plugin file `<id>.ts` or `<id>.js`, its test `<id>.test.ts` or `<id>.test.js` and a `README.md`, nothing else, and the folder's name is the manifest's `id`.
+- [ ] The test runs the plugin in the server's sandbox (`tools/testing/server.ts`), plays its sources instead of asking them, and passes with `node tools/test.mjs`.
 - [ ] The file is the source as I wrote it: not bundled, not minified, no signature comment at its end.
 - [ ] A line `// SPDX-License-Identifier: <licence>` names an open-source licence, and I may license this code.
 - [ ] The manifest asks for no capability the code does not use, and names no host the code does not ask.

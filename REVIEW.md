@@ -26,6 +26,7 @@ A plugin can send nothing but the address it asks: one GET, no headers of its ow
 - **No member data and no message contents in an address**: no names, ids, handles, texts, channel names, nothing about who is on the server or what is said there. The exception is a plugin whose declared purpose needs exactly that (a translation of a message a member asked for, say), and then the README states which data go to which host on whose action.
 - **Nothing that identifies the server** beyond what the request itself gives away (its IP address): no server name, no per-server id made up by the plugin.
 - **What a member typed** (a search word in a command) may go into an address when the member can see that from the command's description.
+- **The pictures of a card are addresses too.** A plugin fetches no picture itself: it names the address in the card it sends, and the server fetches it. Such an address is read like any other the plugin asks: built by the plugin on a fixed host, or taken from a source's answer only when it is an address of that source's own hosts, never one a foreign text supplied, and with nothing about the server or its members in it. The README names where each picture comes from.
 
 ## What comes in
 
@@ -42,6 +43,16 @@ Everything a source sends is somebody else's text.
 - **It does not flood a channel:** what existed before the plugin was switched on is not posted, and a round has a ceiling.
 - **Nothing is posted twice** after a restart or when a job comes a second time.
 - **It keeps to the terms of its sources:** attribution where it is asked for, request limits, no source that forbids this use. The README names the terms it relies on.
+
+## The test
+
+A plugin comes with a test (`plugins/<id>/<id>.test.ts` or `.js`); a submission without one is refused by the check before anybody reads it.
+
+- **It runs the plugin itself, in the server's sandbox** (`tools/testing/server.ts`), not a copy of its functions.
+- **It plays the world around the plugin:** storage, settings, the schedule, channels, and for a plugin with the network the answers of its sources. A test that asks a real host is refused: it would fail with that host and prove nothing on a quiet day.
+- **It covers what this document asks of the plugin:** what the README promises, nothing posted twice, nothing from before the plugin was switched on, foreign text that tries to mention, to format and to bring a link, a source that is down or answers nonsense, the limits of a round.
+- **It is a program that runs in this repository's workflow**, so it is read like one: nothing but the plugin, the helper and Node's own modules, no installs, no child processes, no file outside its folder, no network.
+- The test is not signed and not installed anywhere; it stays here next to the source it holds.
 
 ## An update
 
