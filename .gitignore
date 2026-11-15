@@ -1,0 +1,7 @@
+# The server repository the workflows check out next to this one, and what the signing workflow writes.
+/server/
+/out/
+node_modules/
+*.pem
+!*.pub
+.DS_Store

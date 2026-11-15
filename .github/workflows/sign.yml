@@ -1,0 +1,316 @@
+# Signs one plugin of plugins/ with Squorli's plugin key and publishes the signed file.
+#
+# Started by hand ("Run workflow", always from main) once a plugin's pull request is merged, with the plugin's id and the
+# kind: `reviewed` for somebody else's plugin Squorli read, `official` for Squorli's own.
+#
+# Four jobs, so that the key is never in a job that installed anybody's packages:
+#   check    the same check as check.yml (it installs the server's dependencies for the server's own plugin check).
+#            No secret, no environment: its summary is what the owner reads before approving the next job.
+#   sign     the only job in the GitHub environment `signing` (Settings > Environments > signing: required reviewer = the
+#            repository owner, deployment branches = main only), which alone holds the secret
+#              PLUGIN_SIGNING_KEY   the Ed25519 private key (PEM) whose public half is tools/squorli-plugins.pub of
+#                                   danielklessa/squorli and one of PLUGIN_SIGNING_KEYS in the server. A key of its own,
+#                                   never the release key.
+#            It checks out two repositories and runs one Node script without dependencies (tools/plugin-sign.mjs of the
+#            server at SERVER_REF). No package manager, no install, no cache.
+#   verify   the server at SERVER_REF must take the signed file as the kind it was signed as (dependencies again, no
+#            secret, read-only token).
+#   publish  the GitHub release `<id>-v<version>` with the signed file as its one asset and the plugin's entry in
+#            catalog.json as one commit on main. The only job with a token that may write, and it installs nothing.
+#
+# Nothing here ever runs a plugin. The two inputs reach the scripts through the environment only, never as text inside a
+# script, and every job checks them again before it does anything.
+name: Sign a plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin id (the folder under plugins/)
+        required: true
+        type: string
+      kind:
+        description: reviewed = somebody else's plugin, read by Squorli; official = Squorli's own
+        required: true
+        type: choice
+        options: [reviewed, official]
+        default: reviewed
+
+permissions:
+  contents: read
+
+# One signing run at a time: two would race for the catalogue's commit.
+concurrency:
+  group: sign
+  cancel-in-progress: false
+
+env:
+  PLUGIN: ${{ inputs.plugin }}
+  KIND: ${{ inputs.kind }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # The server's workspace holds the desktop app; nothing here starts it.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    outputs:
+      server: ${{ steps.ref.outputs.sha }}
+      key_id: ${{ steps.ref.outputs.key_id }}
+      name: ${{ steps.plugin.outputs.name }}
+      version: ${{ steps.plugin.outputs.version }}
+    steps:
+      - name: Only from main, only a plugin id, only a known kind
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::Run this workflow from main: only what was merged is signed"; exit 1; fi
+          if [[ ! "$PLUGIN" =~ ^[a-z][a-z0-9-]{2,31}$ ]]; then echo "::error::The input plugin is no plugin id"; exit 1; fi
+          if [ "$KIND" != "reviewed" ] && [ "$KIND" != "official" ]; then echo "::error::The input kind is reviewed or official"; exit 1; fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The server commit and the key's name
+        id: ref
+        run: |
+          ref="$(tr -d ' \r\n' < SERVER_REF)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::SERVER_REF must hold one full commit SHA of danielklessa/squorli"; exit 1; fi
+          if [ "$ref" = "0000000000000000000000000000000000000000" ]; then echo "::error::SERVER_REF is still the placeholder: set it to the commit of danielklessa/squorli that carries tools/plugin-sign.mjs and the plugin key (AGENTS.md)"; exit 1; fi
+          key_id="$(tr -d ' \r\n' < KEY_ID)"
+          if [[ ! "$key_id" =~ ^[a-z0-9-]{1,32}$ ]]; then echo "::error::KEY_ID must hold the name of the plugin key, e.g. 2026-11"; exit 1; fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+          echo "key_id=$key_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ steps.ref.outputs.sha }}
+          path: server
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: server/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+      - name: Install the server's dependencies
+        working-directory: server
+        run: pnpm install --frozen-lockfile
+      - name: Check the plugin as a pull request is checked
+        id: plugin
+        run: |
+          file=""
+          for ext in ts js; do
+            if [ -f "plugins/$PLUGIN/$PLUGIN.$ext" ]; then
+              if [ -n "$file" ]; then echo "::error::plugins/$PLUGIN/ holds both a .ts and a .js file"; exit 1; fi
+              file="plugins/$PLUGIN/$PLUGIN.$ext"
+            fi
+          done
+          if [ -z "$file" ]; then echo "::error::There is no plugins/$PLUGIN/$PLUGIN.ts or .js on main"; exit 1; fi
+          (cd server/apps/server && pnpm exec tsx src/plugin-check.ts "$GITHUB_WORKSPACE/$file") > "$RUNNER_TEMP/check.json" || true
+          if [ ! -s "$RUNNER_TEMP/check.json" ]; then echo "::error::The server's check printed nothing"; exit 1; fi
+          node tools/summary.mjs "$RUNNER_TEMP/check.json" >> "$GITHUB_STEP_SUMMARY"
+          node tools/check-submission.mjs "$RUNNER_TEMP/check.json" --base "$GITHUB_WORKSPACE"
+          version="$(node tools/release-notes.mjs "$RUNNER_TEMP/check.json" --field version)"
+          name="$(node tools/release-notes.mjs "$RUNNER_TEMP/check.json" --field file)"
+          author="$(node tools/release-notes.mjs "$RUNNER_TEMP/check.json" --field author)"
+          if [[ ! "$version" =~ ^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$ ]]; then echo "::error::The check named no version"; exit 1; fi
+          if [ "$name" != "$PLUGIN.ts" ] && [ "$name" != "$PLUGIN.js" ]; then echo "::error::The check named another file than plugins/$PLUGIN/$PLUGIN.ts or .js"; exit 1; fi
+          # A guard against a slip of the hand in the form above: Squorli's own mark only on Squorli's own plugins, and
+          # nobody else's plugin under Squorli's name.
+          if [ "$KIND" = "official" ] && [ "$author" != "Squorli" ]; then echo "::error::official is for plugins whose manifest names the author Squorli; this one names another"; exit 1; fi
+          if [ "$KIND" = "reviewed" ] && [ "$author" = "Squorli" ]; then echo "::error::A plugin whose manifest names the author Squorli is signed as official, not as reviewed"; exit 1; fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "To be signed as **$KIND**: \`plugins/$PLUGIN/$name\` at commit \`$GITHUB_SHA\`, version $version."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sign:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: signing
+    env:
+      SERVER: ${{ needs.check.outputs.server }}
+      KEY_ID: ${{ needs.check.outputs.key_id }}
+      NAME: ${{ needs.check.outputs.name }}
+    steps:
+      - name: Only from main, and only what the check named
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::Run this workflow from main"; exit 1; fi
+          if [[ ! "$PLUGIN" =~ ^[a-z][a-z0-9-]{2,31}$ ]]; then echo "::error::The input plugin is no plugin id"; exit 1; fi
+          if [ "$KIND" != "reviewed" ] && [ "$KIND" != "official" ]; then echo "::error::The input kind is reviewed or official"; exit 1; fi
+          if [[ ! "$SERVER" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$KEY_ID" =~ ^[a-z0-9-]{1,32}$ ]]; then echo "::error::The check handed over no server commit or key name"; exit 1; fi
+          if [ "$NAME" != "$PLUGIN.ts" ] && [ "$NAME" != "$PLUGIN.js" ]; then echo "::error::The check handed over another file name"; exit 1; fi
+      # The same commit the check read: a workflow run is bound to one commit of main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ needs.check.outputs.server }}
+          path: server
+          persist-credentials: false
+      # Node only: tools/plugin-sign.mjs uses nothing but Node's own modules. No package manager runs in this job.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Sign
+        env:
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          if [ -z "$PLUGIN_SIGNING_KEY" ]; then echo "::error::PLUGIN_SIGNING_KEY is not set in the environment signing"; exit 1; fi
+          if [ ! -f "plugins/$PLUGIN/$NAME" ]; then echo "::error::plugins/$PLUGIN/$NAME is not there"; exit 1; fi
+          umask 077
+          printf '%s\n' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/plugin-key.pem"
+          mkdir -p out
+          node server/tools/plugin-sign.mjs sign "plugins/$PLUGIN/$NAME" --key "$RUNNER_TEMP/plugin-key.pem" --key-id "$KEY_ID" --kind "$KIND" --out "out/$NAME"
+          rm -f "$RUNNER_TEMP/plugin-key.pem"
+      - name: The key file is gone, whatever happened
+        if: always()
+        run: rm -f "$RUNNER_TEMP/plugin-key.pem"
+      - name: The signature holds against the key the server carries
+        run: node server/tools/plugin-sign.mjs verify "out/$NAME" --pub server/tools/squorli-plugins.pub
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+
+  verify:
+    needs: [check, sign]
+    runs-on: ubuntu-latest
+    env:
+      NAME: ${{ needs.check.outputs.name }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ needs.check.outputs.server }}
+          path: server
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: server/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+      - name: Install the server's dependencies
+        working-directory: server
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: out
+      - name: The server takes the signed file
+        run: |
+          if [ "$NAME" != "$PLUGIN.ts" ] && [ "$NAME" != "$PLUGIN.js" ]; then echo "::error::The check handed over another file name"; exit 1; fi
+          (cd server/apps/server && pnpm exec tsx src/plugin-check.ts "$GITHUB_WORKSPACE/out/$NAME") > "$RUNNER_TEMP/signed.json" || true
+          if [ ! -s "$RUNNER_TEMP/signed.json" ]; then echo "::error::The server's check printed nothing for the signed file"; exit 1; fi
+          status="$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).files[0];process.stdout.write([e.ok,e.signature&&e.signature.status,e.signature&&e.signature.kind].join(":"))' "$RUNNER_TEMP/signed.json")"
+          if [ "$status" != "true:valid:$KIND" ]; then echo "::error::The server at SERVER_REF does not take the signed file as $KIND ($status). Is the plugin key in its PLUGIN_SIGNING_KEYS?"; exit 1; fi
+          mkdir -p verified
+          cp "$RUNNER_TEMP/signed.json" verified/signed.json
+          node tools/release-notes.mjs "$RUNNER_TEMP/signed.json" > verified/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified
+          path: verified/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [check, sign, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NAME: ${{ needs.check.outputs.name }}
+      VERSION: ${{ needs.check.outputs.version }}
+      KEY_ID: ${{ needs.check.outputs.key_id }}
+    steps:
+      - name: What the check named
+        run: |
+          if [[ ! "$PLUGIN" =~ ^[a-z][a-z0-9-]{2,31}$ ]]; then echo "::error::The input plugin is no plugin id"; exit 1; fi
+          if [ "$NAME" != "$PLUGIN.ts" ] && [ "$NAME" != "$PLUGIN.js" ]; then echo "::error::The check handed over another file name"; exit 1; fi
+          if [[ ! "$VERSION" =~ ^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$ ]]; then echo "::error::The check handed over no version"; exit 1; fi
+          echo "TAG=$PLUGIN-v$VERSION" >> "$GITHUB_ENV"
+      # This checkout keeps its token: the catalogue's commit is pushed with it. Nothing is installed in this job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ needs.check.outputs.server }}
+          path: server
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: out
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified
+          path: verified
+      - name: The signature once more, on what will be published
+        run: node server/tools/plugin-sign.mjs verify "out/$NAME" --pub server/tools/squorli-plugins.pub
+      - name: The release with the signed file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/published"
+            gh release download "$TAG" --pattern "$NAME" --dir "$RUNNER_TEMP/published" 2>/dev/null || true
+            if [ ! -f "$RUNNER_TEMP/published/$NAME" ]; then
+              gh release upload "$TAG" "out/$NAME"
+            elif cmp -s "$RUNNER_TEMP/published/$NAME" "out/$NAME"; then
+              echo "::notice::Release $TAG carries this very file already; left as it is."
+            else
+              # Servers have installed the published file under this version: it is never replaced.
+              echo "::error::Release $TAG exists with another file. A changed plugin needs a new version."; exit 1
+            fi
+          else
+            gh release create "$TAG" "out/$NAME" --target "$GITHUB_SHA" --title "$PLUGIN $VERSION" --notes-file verified/notes.md
+          fi
+      - name: The catalogue
+        run: |
+          node tools/update-catalog.mjs --check verified/signed.json --kind "$KIND" --signed "out/$NAME" --pub server/tools/squorli-plugins.pub --tool server/tools/plugin-sign.mjs
+          if git diff --quiet -- catalog.json; then echo "The catalogue names this version already."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add catalog.json
+          git commit -m "Catalogue: $PLUGIN $VERSION signed as $KIND"
+          if ! git push origin HEAD:main; then
+            # main moved since this run began: once more on top of it.
+            if ! { git pull --rebase origin main && git push origin HEAD:main; }; then
+              echo "::error::Release $TAG exists with the signed file, but the catalogue's commit was refused (a branch rule?). Add the entry by hand: AGENTS.md, \"When the catalogue commit is refused\"."
+              exit 1
+            fi
+          fi
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### Signed: $PLUGIN $VERSION as $KIND (key $KEY_ID)"
+            echo
+            echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+            echo
+            echo "SHA-256 of the file without its signature: \`$(node server/tools/plugin-sign.mjs hash "out/$NAME")\`"
+            echo
+            echo "The signature, the file's last line:"
+            echo
+            echo '```'
+            tail -n 1 "out/$NAME"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

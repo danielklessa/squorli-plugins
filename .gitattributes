@@ -1,0 +1,2 @@
+# Every file with Unix line ends, on every system: a plugin is hashed in one form, and a checkout must not change it.
+* text=auto eol=lf

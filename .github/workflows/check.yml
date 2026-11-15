@@ -1,0 +1,97 @@
+# Checks submitted plugins: on every pull request that touches plugins/, and on every push to main.
+#
+# What it does: reads each plugin file with the server's own code (danielklessa/squorli at the commit SERVER_REF names:
+# the manifest, the TypeScript's types taken off, a compile in the sandbox, the signature) and then holds it against the
+# rules of this repository (tools/check-submission.mjs). It NEVER runs a plugin, and it has no secret and no write access.
+#
+# A pull request is somebody else's content, so the job keeps two checkouts apart:
+#   trusted/     the base branch: the tools, SERVER_REF and the catalogue come from here, never from the pull request
+#   submission/  the pull request (merged into the base): only plugin files and their READMEs are read from here, as text
+# Never change this workflow to `pull_request_target`, and never give it a secret: the signing key lives in the environment
+# `signing`, which only sign.yml names.
+name: Check plugins
+
+on:
+  pull_request:
+    paths: ["plugins/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # The server's workspace holds the desktop app; nothing here starts it.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: submission
+          # The merge commit and its first parent (the base): enough to see which files the pull request changes.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: The server commit whose check is used
+        id: ref
+        run: |
+          ref="$(tr -d ' \r\n' < trusted/SERVER_REF)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::SERVER_REF must hold one full commit SHA of danielklessa/squorli"; exit 1; fi
+          if [ "$ref" = "0000000000000000000000000000000000000000" ]; then echo "::error::SERVER_REF is still the placeholder: set it to the commit of danielklessa/squorli that carries tools/plugin-sign.mjs and the plugin key (AGENTS.md)"; exit 1; fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danielklessa/squorli
+          ref: ${{ steps.ref.outputs.sha }}
+          path: server
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: server/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+      - name: Install the server's dependencies
+        working-directory: server
+        run: pnpm install --frozen-lockfile
+      - name: Which plugins to check
+        id: files
+        working-directory: submission
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # File names of a pull request are read by the tool only; it prints paths made of names it has checked.
+          if [ "$EVENT" = "pull_request" ]; then
+            git diff --name-only -z HEAD^1 HEAD -- plugins > "$RUNNER_TEMP/changed"
+            node ../trusted/tools/list-plugins.mjs --base "$PWD" --changed-z "$RUNNER_TEMP/changed" > "$RUNNER_TEMP/files"
+          else
+            node ../trusted/tools/list-plugins.mjs --base "$PWD" > "$RUNNER_TEMP/files"
+          fi
+          count="$(wc -l < "$RUNNER_TEMP/files" | tr -d ' ')"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "$count plugin file(s) to check"
+          cat "$RUNNER_TEMP/files"
+      - name: The server's own check
+        if: steps.files.outputs.count != '0'
+        working-directory: server/apps/server
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/files"
+          # Exit code 1 means "a file would be refused": the next step says which and why.
+          pnpm exec tsx src/plugin-check.ts "${files[@]}" > "$RUNNER_TEMP/check.json" || true
+          if [ ! -s "$RUNNER_TEMP/check.json" ]; then echo "::error::The server's check printed nothing"; exit 1; fi
+          node "$GITHUB_WORKSPACE/trusted/tools/summary.mjs" "$RUNNER_TEMP/check.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: The rules of this repository
+        if: steps.files.outputs.count != '0'
+        run: node trusted/tools/check-submission.mjs "$RUNNER_TEMP/check.json" --base "$GITHUB_WORKSPACE/submission" --catalog "$GITHUB_WORKSPACE/trusted/catalog.json"
