@@ -8,13 +8,13 @@
         "de": "Spiele-News"
       },
       "description": {
-        "en": "Posts news into channels of your choice: patch notes of the games you follow on Steam, games that are free to keep right now, and new graphics drivers.",
-        "de": "Schreibt News in Kanäle deiner Wahl: Patchnotes der Spiele, denen ihr auf Steam folgt, Spiele, die es gerade kostenlos gibt, und neue Grafiktreiber."
+        "en": "Posts news into channels of your choice: announcements and patch notes of the games you follow on Steam, games that are free to keep right now, and new graphics drivers.",
+        "de": "Schreibt News in Kanäle deiner Wahl: Ankündigungen und Patchnotes der Spiele, denen ihr auf Steam folgt, Spiele, die es gerade kostenlos gibt, und neue Grafiktreiber."
       },
       "author": "Squorli",
       "homepage": "https://squorli.com/en/docs/plugins/",
       "kind": "official",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "apiVersion": 2,
       "capabilities": [
         "messages.write",
@@ -25,14 +25,15 @@
         "store.steampowered.com",
         "store-site-backend-static.ak.epicgames.com",
         "www.gamerpower.com",
-        "gfwsl.geforce.com"
+        "gfwsl.geforce.com",
+        "www.intel.com"
       ],
       "language": "ts",
       "file": "game-news.ts",
-      "sha256": "552be31004a8c27250ab9c0c4393e74fb2b4f425db759f7a7570920a9dfe7519",
+      "sha256": "e4e15777a9b26e8509500f9e87777b24f15595bf87ebab878535931f08c6182a",
       "key": "2026-11",
       "signedAt": "2026-11-15",
-      "download": "https://github.com/danielklessa/squorli-plugins/releases/download/game-news-v1.0.0/game-news.ts",
+      "download": "https://github.com/danielklessa/squorli-plugins/releases/download/game-news-v1.1.0/game-news.ts",
       "source": "https://github.com/danielklessa/squorli-plugins/tree/main/plugins/game-news"
     }
   ]
